@@ -1,0 +1,192 @@
+from stable_baselines import PPO2
+from stable_baselines import A2C
+from stable_baselines import TD3
+from stable_baselines.common.vec_env import DummyVecEnv
+import optuna
+
+from env.EnvMultipleStock_train import StockEnvTrain
+from env.EnvMultipleStock_trade import StockEnvTrade
+from env import EnvMultipleStock_train
+from stable_baselines.common.noise import NormalActionNoise, OrnsteinUhlenbeckActionNoise, AdaptiveParamNoiseSpec
+
+from preprocessing.preprocessors import *
+import os
+import time
+
+from pathlib import Path
+import os
+TRAINED_MODEL_DIR = Path("trained_models/05-09-2022,12-18-59")
+import pandas as pd
+from pathlib import Path
+PATH = Path("trained_models/TuningTest")
+VALIDATION_RANGE = 63
+
+import tensorflow as tf
+tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
+
+data = pd.read_csv('done_data.csv', index_col=0)
+unique_trade_date = data[(data.datadate > 20151001)&(data.datadate <= 20200707)].datadate.unique()
+train_data = data_split(data, start=20090000, end=unique_trade_date[0])
+env_train = DummyVecEnv([lambda: StockEnvTrain(train_data)])
+trade_data = data_split(data, start=unique_trade_date[0], end=unique_trade_date[63])
+stockdim = EnvMultipleStock_train.STOCK_DIM
+env_trade = DummyVecEnv([lambda: StockEnvTrade(trade_data,
+                                                turbulence_threshold=120,
+                                                initial=True,
+                                                previous_state=[],
+                                                model_name="name",
+                                                iteration=63)])
+
+def train_A2C(env_train, model_name, timesteps=190000, lr_trial=0.00135):
+    """A2C model"""
+
+    start = time.time()
+    model = A2C('MlpPolicy', env_train, verbose=0, learning_rate=lr_trial)
+    model.learn(total_timesteps=timesteps)
+    end = time.time()
+    print("the save name is", f"{PATH}/{model_name}")
+    model.save(Path(f"trained_models/TuningTest/{model_name}"))
+    print('Training time (A2C): ', (end - start) / 60, ' minutes')
+    return model
+
+def train_PPO(env_train, model_name, timesteps=85000, lr_trial=0.00175):
+    """A2C model"""
+
+    start = time.time()
+    model = PPO2('MlpPolicy', env_train, verbose=0, learning_rate=lr_trial)
+    model.learn(total_timesteps=timesteps)
+    end = time.time()
+    print("the save name is", f"{PATH}/{model_name}")
+    model.save(Path(f"trained_models/TuningTest/{model_name}"))
+    print('Training time (A2C): ', (end - start) / 60, ' minutes')
+    return model
+
+def train_TD3(env_train, model_name, timesteps=160000, lr_trial=0.00105):
+    """A2C model"""
+    n_actions = env_train.action_space.shape[-1]
+    param_noise = None
+    action_noise = OrnsteinUhlenbeckActionNoise(mean=np.zeros(n_actions), sigma=float(0.5) * np.ones(n_actions))
+
+    start = time.time()
+    model = TD3('MlpPolicy', env_train, action_noise=action_noise, verbose=0, learning_rate=lr_trial)
+    model.learn(total_timesteps=timesteps)
+    end = time.time()
+    print("the save name is", f"{PATH}/{model_name}")
+    model.save(Path(f"trained_models/TuningTest/{model_name}"))
+    print('Training time (A2C): ', (end - start) / 60, ' minutes')
+    return model
+
+def objectiveA2C(trial):
+    lr_trial = trial.suggest_float('learning_rate', 0.0001, 0.002)
+    timesteps_trial = trial.suggest_int("timesteps", 50000, 200000)
+    model = train_A2C(env_train, f"LR{lr_trial}_TS{timesteps_trial}", timesteps=timesteps_trial, lr_trial=lr_trial)
+    total_reward = 0
+    asset_memory = []
+    obs = env_trade.reset()[0]
+    for i in range(VALIDATION_RANGE):
+        end_total_asset = obs[0]+ \
+        sum(np.array(obs[1:(stockdim+1)])*np.array(obs[(stockdim+1):(stockdim*2+1)]))
+        asset_memory.append(end_total_asset)
+
+        action, obs = model.predict(obs)
+        obs, reward, done, info = env_trade.step([action])
+        obs = obs[0]
+        total_reward += reward
+        average_reward = total_reward / i + 1
+
+
+        trial.report(average_reward, i)
+        if trial.should_prune():
+            raise optuna.TrialPruned()
+    sharpe = calc_sharpe(asset_memory)
+
+    return sharpe
+
+def objectivePPO(trial):
+    lr_trial = trial.suggest_float('learning_rate', 0.0001, 0.002)
+    timesteps_trial = trial.suggest_int("timesteps", 50000, 200000)
+    model = train_PPO(env_train, f"LR{lr_trial}_TS{timesteps_trial}", timesteps=timesteps_trial, lr_trial=lr_trial)
+    total_reward = 0
+    asset_memory = []
+    obs = env_trade.reset()[0]
+    for i in range(VALIDATION_RANGE):
+        end_total_asset = obs[0]+ \
+        sum(np.array(obs[1:(stockdim+1)])*np.array(obs[(stockdim+1):(stockdim*2+1)]))
+        asset_memory.append(end_total_asset)
+
+        action, obs = model.predict(obs)
+        obs, reward, done, info = env_trade.step([action])
+        obs = obs[0]
+        total_reward += reward
+        average_reward = total_reward / i + 1
+
+
+        trial.report(average_reward, i)
+        if trial.should_prune():
+            raise optuna.TrialPruned()
+    sharpe = calc_sharpe(asset_memory)
+
+    return sharpe
+    
+def objectiveTD3(trial):
+    lr_trial = trial.suggest_float('learning_rate', 0.0001, 0.002)
+    timesteps_trial = trial.suggest_int("timesteps", 50000, 200000)
+    model = train_TD3(env_train, f"LR{lr_trial}_TS{timesteps_trial}", timesteps=timesteps_trial, lr_trial=lr_trial)
+    total_reward = 0
+    asset_memory = []
+    obs = env_trade.reset()[0]
+    for i in range(VALIDATION_RANGE):
+        end_total_asset = obs[0]+ \
+        sum(np.array(obs[1:(stockdim+1)])*np.array(obs[(stockdim+1):(stockdim*2+1)]))
+        asset_memory.append(end_total_asset)
+
+        action, obs = model.predict(obs)
+        obs, reward, done, info = env_trade.step([action])
+        obs = obs[0]
+        total_reward += reward
+        average_reward = total_reward / i + 1
+
+
+        trial.report(average_reward, i)
+        if trial.should_prune():
+            raise optuna.TrialPruned()
+    sharpe = calc_sharpe(asset_memory)
+
+    return sharpe
+
+def calc_sharpe(asset_memory):
+        df_total_value = pd.DataFrame(asset_memory)
+        df_total_value.columns = ['account_value']
+        df_total_value['daily_return']=df_total_value.pct_change(1)
+
+        sharpe = (VALIDATION_RANGE**0.5)*df_total_value['daily_return'].mean() / df_total_value['daily_return'].std()
+        return sharpe
+
+def main():
+    list_best_hyperparams = []
+
+    print("======A2C=======")
+    studyA2C = optuna.create_study(direction='maximize', pruner=optuna.pruners.HyperbandPruner())
+    studyA2C.optimize(objectiveA2C, n_trials=50)
+
+    list_best_hyperparams.append(studyA2C.best_params)
+
+    print("======PPO=======")    
+    studyPPO = optuna.create_study(direction='maximize', pruner=optuna.pruners.HyperbandPruner())
+    studyPPO.optimize(objectivePPO, n_trials=50)
+    
+    list_best_hyperparams.append(studyPPO.best_params)
+
+    print("======TD3======")
+    studyTD3 = optuna.create_study(direction='maximize', pruner=optuna.pruners.HyperbandPruner())
+    studyTD3.optimize(objectiveTD3, n_trials=50)
+    
+    list_best_hyperparams.append(studyTD3.best_params)
+
+    best_params = pd.DataFrame(list_best_hyperparams)
+    best_params.to_csv("best_params.csv")
+        
+
+
+if __name__ == "__main__":
+    main()
